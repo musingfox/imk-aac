@@ -14,7 +14,10 @@ use crate::picker::Picker;
 const BW: &str = "/opt/homebrew/bin/bw";
 const IMK: &str = "/usr/local/bin/imk";
 const MASTER_KEY_URL: &str = "imk://api/bitwarden";
-// At boot immurok's BLE link may not be up yet, so a failed `imk get` is retried.
+// Under launchd a bare `imk get` shows no overlay (immurok treats the caller as
+// manual), so it runs inside `imk run --agent`, whose overlay launchd callers do
+// get; the nested get then needs no second touch (measured with immurok 1.6.11).
+// At boot immurok's BLE link may not be up yet, so a failed attempt is retried.
 const UNLOCK_ATTEMPTS: u32 = 5;
 const UNLOCK_RETRY_DELAY: Duration = Duration::from_secs(10);
 
@@ -165,7 +168,7 @@ async fn master_password() -> Result<Zeroizing<String>, String> {
     for attempt in 1..=UNLOCK_ATTEMPTS {
         info!(attempt, "touch immurok to unlock Bitwarden");
         let out = Command::new(IMK)
-            .args(["get", MASTER_KEY_URL])
+            .args(["run", "--agent", "--", IMK, "get", MASTER_KEY_URL])
             .stdin(Stdio::null())
             .output()
             .await
@@ -178,7 +181,7 @@ async fn master_password() -> Result<Zeroizing<String>, String> {
         if out.status.success() && !master.is_empty() {
             return Ok(master);
         }
-        warn!(attempt, code = ?out.status.code(), "imk get failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+        warn!(attempt, code = ?out.status.code(), "unlock attempt failed: {}", String::from_utf8_lossy(&out.stderr).trim());
         if attempt < UNLOCK_ATTEMPTS {
             tokio::time::sleep(UNLOCK_RETRY_DELAY).await;
         }
