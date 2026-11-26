@@ -1,0 +1,7 @@
+imk-aac
+Copyright 2026 musingfox
+
+src/storage/connection_storage.rs and src/storage/identity_storage.rs are
+derived from bitwarden/agent-access (https://github.com/bitwarden/agent-access),
+crates/ap-cli/src/storage/, commit 3b000d15af71be5ddcf8893b099f3a66d386be9d,
+licensed under the Apache License, Version 2.0.
