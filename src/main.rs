@@ -64,8 +64,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let vault = Arc::clone(&vault);
                     tokio::spawn(async move {
                         let label = query.to_string();
-                        let credential = match vault.lookup(&query).await {
-                            Ok(Some(c)) => Some(c),
+                        let found = match vault.lookup(&query).await {
+                            Ok(Some(f)) => Some(f),
                             Ok(None) => {
                                 warn!(query = label, "not found in vault; denied without asking");
                                 None
@@ -75,8 +75,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 None
                             }
                         };
-                        let credential = match credential {
-                            Some(c) if touch_approved(&label).await => Some(c),
+                        let credential = match found {
+                            Some(f) if touch_approved(&label, &f.summary).await => Some(f.credential),
                             _ => None,
                         };
                         let credential_id = credential.as_ref().and_then(|c| c.credential_id.clone());
@@ -93,10 +93,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-async fn touch_approved(query: &str) -> bool {
-    info!(query, "credential request; waiting for immurok touch");
+/// The overlay shows the gated command, so `true` carries the summary as an
+/// ignored argument to tell the user what the touch releases.
+async fn touch_approved(query: &str, summary: &str) -> bool {
+    info!(
+        query,
+        summary, "credential request; waiting for immurok touch"
+    );
     match Command::new(IMK)
-        .args(["run", "--agent", "--", "/usr/bin/true"])
+        .args(["run", "--agent", "--", "/usr/bin/true", summary])
         .stdin(std::process::Stdio::null())
         .status()
         .await

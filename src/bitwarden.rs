@@ -16,6 +16,16 @@ const MASTER_KEY_URL: &str = "imk://api/bitwarden";
 const UNLOCK_ATTEMPTS: u32 = 5;
 const UNLOCK_RETRY_DELAY: Duration = Duration::from_secs(10);
 
+// immurok's overlay shows about two lines of the gated command and cuts the
+// rest (measured with immurok 1.6.11), so the summary is kept short.
+const SUMMARY_MAX_CHARS: usize = 60;
+
+/// A credential and the line the approval overlay shows for it.
+pub struct Found {
+    pub credential: CredentialData,
+    pub summary: String,
+}
+
 pub struct Vault {
     session: Zeroizing<String>,
 }
@@ -62,7 +72,7 @@ impl Vault {
 
     /// Looks the item up, and on a miss syncs once and looks again, so items
     /// added on other devices are found without restarting.
-    pub async fn lookup(&self, query: &CredentialQuery) -> Result<Option<CredentialData>, String> {
+    pub async fn lookup(&self, query: &CredentialQuery) -> Result<Option<Found>, String> {
         let (search, field) = target(query);
         if let Some(c) = self.get(search, field).await? {
             return Ok(Some(c));
@@ -72,14 +82,10 @@ impl Vault {
         self.get(search, field).await
     }
 
-    async fn get(
-        &self,
-        search: &str,
-        field: Option<&str>,
-    ) -> Result<Option<CredentialData>, String> {
+    async fn get(&self, search: &str, field: Option<&str>) -> Result<Option<Found>, String> {
         let out = self.bw(&["get", "item", search]).await?;
         if out.status.success() {
-            return Ok(match field {
+            let credential = match field {
                 Some(name) => {
                     let found = field_from_item(&out.stdout, name);
                     if found.is_none() {
@@ -88,7 +94,11 @@ impl Vault {
                     found
                 }
                 None => credential_from_item(&out.stdout),
-            });
+            };
+            return Ok(credential.map(|credential| Found {
+                credential,
+                summary: summary(item_name(&out.stdout).as_deref(), field),
+            }));
         }
         let stderr = String::from_utf8_lossy(&out.stderr);
         if stderr.contains("Not found") {
@@ -152,6 +162,7 @@ fn target(query: &CredentialQuery) -> (&str, Option<&str>) {
 #[derive(Deserialize)]
 struct BwItem {
     id: Option<String>,
+    name: Option<String>,
     login: Option<BwLogin>,
     #[serde(default)]
     fields: Vec<BwField>,
@@ -215,6 +226,27 @@ fn field_from_item(json: &[u8], name: &str) -> Option<CredentialData> {
     })
 }
 
+fn item_name(json: &[u8]) -> Option<String> {
+    serde_json::from_slice::<BwItem>(json).ok()?.name
+}
+
+/// "<item name> / <field>", or "/ login" when the whole login is released.
+/// The item name is cut first so the field always stays visible.
+fn summary(item: Option<&str>, field: Option<&str>) -> String {
+    let clean = |s: &str| s.chars().filter(|c| !c.is_control()).collect::<String>();
+    let field = clean(field.unwrap_or("login"));
+    let item = clean(item.unwrap_or("?"));
+    let room = SUMMARY_MAX_CHARS
+        .saturating_sub(field.chars().count() + 3)
+        .max(8);
+    let item = if item.chars().count() > room {
+        item.chars().take(room - 1).chain(['…']).collect()
+    } else {
+        item
+    };
+    format!("{item} / {field}")
+}
+
 fn field_names(json: &[u8]) -> Vec<String> {
     serde_json::from_slice::<BwItem>(json)
         .map(|item| item.fields.into_iter().filter_map(|f| f.name).collect())
@@ -263,6 +295,21 @@ mod tests {
         assert!(field_from_item(ITEM_WITH_FIELDS, "nope").is_none());
         assert!(field_from_item(ITEM_WITH_FIELDS, "empty").is_none());
         assert!(field_from_item(br#"{"id":"abc"}"#, "token").is_none());
+    }
+
+    #[test]
+    fn summary_names_item_and_field() {
+        assert_eq!(summary(Some("GitHub"), Some("token")), "GitHub / token");
+        assert_eq!(summary(Some("GitHub"), None), "GitHub / login");
+        assert_eq!(summary(None, None), "? / login");
+    }
+
+    #[test]
+    fn summary_cuts_the_item_name_first_and_drops_control_chars() {
+        let s = summary(Some(&"n".repeat(100)), Some("api\ntoken"));
+        assert!(s.ends_with(" / apitoken"), "{s}");
+        assert!(s.chars().count() <= SUMMARY_MAX_CHARS, "{s}");
+        assert!(s.contains('…'));
     }
 
     #[test]
