@@ -18,8 +18,12 @@ pub struct Request<'a> {
     pub item: &'a str,
     pub field: &'a str,
     pub picked: bool,
-    pub agent: &'a str,
-    pub command: &'a str,
+    /// "local", "remote" or "ambiguous"; agent and command are known only for local.
+    pub origin: &'a str,
+    pub agent: Option<&'a str>,
+    pub command: Option<&'a str>,
+    /// Shown in the command box when the command is unknown.
+    pub query: &'a str,
     pub timeout_secs: u64,
 }
 

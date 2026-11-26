@@ -6,7 +6,9 @@ import SwiftUI
 struct Request: Decodable {
     let provider, item, field: String
     let picked: Bool
-    let agent, command: String
+    let origin: String
+    let agent, command: String?
+    let query: String
     let timeout_secs: Double
 }
 
@@ -23,21 +25,25 @@ else {
     exit(Exit.badRequest.rawValue)
 }
 let provider = request.provider, item = request.item, field = request.field, picked = request.picked
-let agent = request.agent, command = request.command
+let origin = request.origin
+let command = request.command ?? request.query
 let total = request.timeout_secs
 let started = Date()
 
 let lang = Locale.preferredLanguages.first ?? "en"
 let strings: [String: [String: String]] = [
-    "zh-Hant": ["title": "%@ 想取用一個密碼", "hint": "摸 immurok 放行", "provider": "提供者", "item": "項目",
+    "zh-Hant": ["title": "%@ 想取用一個密碼", "titleAny": "有 agent 想取用一個密碼", "from": "來源",
+                "remote": "遠端裝置", "ambiguous": "無法判斷", "hint": "摸 immurok 放行", "provider": "提供者", "item": "項目",
                 "field": "欄位", "picked": "自動選擇", "command": "指令", "deny": "拒絕",
                 "left": "%d 秒後自動拒絕", "more": "點一下看完整指令"],
-    "en": ["title": "%@ is asking for a secret", "hint": "Touch immurok to allow", "provider": "Provider", "item": "Item",
+    "en": ["title": "%@ is asking for a secret", "titleAny": "An agent is asking for a secret", "from": "From",
+           "remote": "Remote device", "ambiguous": "Can't tell", "hint": "Touch immurok to allow", "provider": "Provider", "item": "Item",
            "field": "Field", "picked": "Auto-picked", "command": "Command", "deny": "Deny",
            "left": "Denies in %d s", "more": "Click to see the full command"],
 ]
 let table = strings[lang.hasPrefix("zh") ? "zh-Hant" : "en"]!
 func t(_ k: String) -> String { table[k]! }
+let title = origin == "local" && request.agent != nil ? String(format: t("title"), request.agent!) : t("titleAny")
 
 struct Knocking: View {
     @State private var ripple = false
@@ -152,7 +158,7 @@ struct Card: View {
             HStack(spacing: 12) {
                 Knocking()
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(String(format: t("title"), agent)).font(.system(size: 15, weight: .semibold))
+                    Text(title).font(.system(size: 15, weight: .semibold))
                     Text(t("hint")).font(.system(size: 12)).foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 0)
@@ -168,6 +174,10 @@ struct Card: View {
                 .buttonStyle(.plain)
             }
             Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 8) {
+                if origin == "remote" || origin == "ambiguous" {
+                    Row(label: t("from"), value: t(origin), mono: false)
+                    Divider().gridCellUnsizedAxes(.horizontal)
+                }
                 Row(label: t("provider"), value: provider, mono: false)
                 Divider().gridCellUnsizedAxes(.horizontal)
                 Row(label: t("item"), value: item)

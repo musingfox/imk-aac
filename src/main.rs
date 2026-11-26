@@ -2,6 +2,7 @@ mod bitwarden;
 mod overlay;
 mod panel;
 mod picker;
+mod requester;
 mod storage;
 
 use std::sync::Arc;
@@ -15,6 +16,7 @@ use tracing::{error, info, warn};
 use bitwarden::{Found, Vault};
 use panel::{Outcome, Panel};
 use picker::Picker;
+use requester::Requester;
 use storage::{FileConnectionCache, FileIdentityStorage};
 
 // Same storage name as `aac listen`, so its identity and paired connections are reused.
@@ -22,8 +24,6 @@ const STORAGE_NAME: &str = "user_client";
 const PROXY_URL: &str = "wss://ap.lesspassword.dev";
 const IMK: &str = "/usr/local/bin/imk";
 const PROVIDER: &str = "Bitwarden";
-// Stub until the requester can be detected.
-const AGENT: &str = "Agent";
 // How long `imk run --agent` waits for a touch (measured), so the panel's
 // countdown ends with it.
 const TOUCH_TIMEOUT_SECS: u64 = 30;
@@ -91,8 +91,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         };
                         let credential = match found {
-                            Some(f) if touch_approved(&label, &f).await => Some(f.credential),
-                            _ => None,
+                            Some(f) => {
+                                // Display only: argv and process names can be forged by any
+                                // local process, so the requester never decides approval.
+                                let requester = requester::detect(&query).await;
+                                if touch_approved(&label, &f, &requester).await {
+                                    Some(f.credential)
+                                } else {
+                                    None
+                                }
+                            }
+                            None => None,
                         };
                         let credential_id = credential.as_ref().and_then(|c| c.credential_id.clone());
                         let _ = reply.send(CredentialRequestReply {
@@ -110,7 +119,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// The touch on immurok approves, as before; the panel can only deny, by its
 /// Deny button or when its countdown ends.
-async fn touch_approved(query: &str, found: &Found) -> bool {
+async fn touch_approved(query: &str, found: &Found, requester: &Requester) -> bool {
     let summary = found.summary();
     info!(
         query,
@@ -132,8 +141,16 @@ async fn touch_approved(query: &str, found: &Found) -> bool {
         item: &found.item,
         field: &found.field,
         picked: found.picked,
-        agent: AGENT,
-        command: query,
+        origin: requester.origin(),
+        agent: match requester {
+            Requester::Local { agent, .. } => agent.as_deref(),
+            _ => None,
+        },
+        command: match requester {
+            Requester::Local { command, .. } => command.as_deref(),
+            _ => None,
+        },
+        query,
         timeout_secs: TOUCH_TIMEOUT_SECS,
     })
     .await;
