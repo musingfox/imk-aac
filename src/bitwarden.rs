@@ -20,6 +20,11 @@ const UNLOCK_RETRY_DELAY: Duration = Duration::from_secs(10);
 // rest (measured with immurok 1.6.11), so the summary is kept short.
 const SUMMARY_MAX_CHARS: usize = 60;
 
+/// `--id <item>:?` asks for the item's custom field names, never their values,
+/// so an agent can learn what to ask for next.
+const LIST_FIELDS: &str = "?";
+const LIST_FIELDS_LABEL: &str = "欄位名稱清單";
+
 /// A credential and the line the approval overlay shows for it.
 pub struct Found {
     pub credential: CredentialData,
@@ -86,6 +91,7 @@ impl Vault {
         let out = self.bw(&["get", "item", search]).await?;
         if out.status.success() {
             let credential = match field {
+                Some(LIST_FIELDS) => names_from_item(&out.stdout),
                 Some(name) => {
                     let found = field_from_item(&out.stdout, name);
                     if found.is_none() {
@@ -97,7 +103,16 @@ impl Vault {
             };
             return Ok(credential.map(|credential| Found {
                 credential,
-                summary: summary(item_name(&out.stdout).as_deref(), field),
+                summary: summary(
+                    item_name(&out.stdout).as_deref(),
+                    field.map(|f| {
+                        if f == LIST_FIELDS {
+                            LIST_FIELDS_LABEL
+                        } else {
+                            f
+                        }
+                    }),
+                ),
             }));
         }
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -226,6 +241,22 @@ fn field_from_item(json: &[u8], name: &str) -> Option<CredentialData> {
     })
 }
 
+fn names_from_item(json: &[u8]) -> Option<CredentialData> {
+    let names: Vec<String> = field_names(json)
+        .into_iter()
+        .filter(|n| !n.is_empty())
+        .collect();
+    (!names.is_empty()).then(|| CredentialData {
+        username: None,
+        password: Some(Zeroizing::new(names.join(", "))),
+        totp: None,
+        uri: None,
+        notes: None,
+        credential_id: None,
+        domain: None,
+    })
+}
+
 fn item_name(json: &[u8]) -> Option<String> {
     serde_json::from_slice::<BwItem>(json).ok()?.name
 }
@@ -295,6 +326,19 @@ mod tests {
         assert!(field_from_item(ITEM_WITH_FIELDS, "nope").is_none());
         assert!(field_from_item(ITEM_WITH_FIELDS, "empty").is_none());
         assert!(field_from_item(br#"{"id":"abc"}"#, "token").is_none());
+    }
+
+    #[test]
+    fn field_listing_carries_names_and_no_values() {
+        let c = names_from_item(ITEM_WITH_FIELDS).expect("names");
+        let listed = c.password.as_deref().map(String::as_str);
+        assert_eq!(listed, Some("token, empty"));
+        assert!(!listed.unwrap().contains("t0k"));
+        assert!(c.username.is_none() && c.uri.is_none() && c.notes.is_none());
+        assert!(c.totp.is_none() && c.domain.is_none() && c.credential_id.is_none());
+        assert!(names_from_item(br#"{"id":"abc","fields":[]}"#).is_none());
+        assert!(names_from_item(br#"{"id":"abc"}"#).is_none());
+        assert!(names_from_item(br#"{"id":"abc","fields":[{"name":"","value":"v"}]}"#).is_none());
     }
 
     #[test]
