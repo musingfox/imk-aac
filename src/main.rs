@@ -1,4 +1,5 @@
 mod bitwarden;
+mod picker;
 mod storage;
 
 use std::sync::Arc;
@@ -11,6 +12,7 @@ use tokio::process::Command;
 use tracing::{error, info, warn};
 
 use bitwarden::Vault;
+use picker::Picker;
 use storage::{FileConnectionCache, FileIdentityStorage};
 
 // Same storage name as `aac listen`, so its identity and paired connections are reused.
@@ -38,7 +40,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("no paired connection; pair once with `aac listen` first".into());
     }
 
-    let vault = Arc::new(Vault::unlock().await?);
+    let picker = Picker::from_env().unwrap_or_else(|e| {
+        warn!("field picking stays off: {e}");
+        None
+    });
+    info!(enabled = picker.is_some(), "field picking");
+    let vault = Arc::new(Vault::unlock(picker).await?);
     vault.sync().await?;
 
     let proxy = Box::new(DefaultProxyClient::from_url(PROXY_URL.to_string()));

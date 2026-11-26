@@ -7,6 +7,8 @@ use tokio::process::Command;
 use tracing::{info, warn};
 use zeroize::Zeroizing;
 
+use crate::picker::Picker;
+
 // Absolute paths: a planted bw or imk earlier on PATH would otherwise receive
 // the master password or the session.
 const BW: &str = "/opt/homebrew/bin/bw";
@@ -25,6 +27,11 @@ const SUMMARY_MAX_CHARS: usize = 60;
 const LIST_FIELDS: &str = "?";
 const LIST_FIELDS_LABEL: &str = "欄位名稱清單";
 
+/// `--id <item>:~<need>` lets the optional local model pick the field; the
+/// overlay marks the pick so the user knows a model chose it.
+const PICK_PREFIX: char = '~';
+const PICKED_MARK: &str = "（自動選擇）";
+
 /// A credential and the line the approval overlay shows for it.
 pub struct Found {
     pub credential: CredentialData,
@@ -33,10 +40,11 @@ pub struct Found {
 
 pub struct Vault {
     session: Zeroizing<String>,
+    picker: Option<Picker>,
 }
 
 impl Vault {
-    pub async fn unlock() -> Result<Self, String> {
+    pub async fn unlock(picker: Option<Picker>) -> Result<Self, String> {
         let master = master_password().await?;
         let out = Command::new(BW)
             .args([
@@ -59,7 +67,7 @@ impl Vault {
                 String::from_utf8_lossy(&out.stderr).trim()
             ));
         }
-        Ok(Self { session })
+        Ok(Self { session, picker })
     }
 
     pub async fn sync(&self) -> Result<(), String> {
@@ -79,6 +87,10 @@ impl Vault {
     /// added on other devices are found without restarting.
     pub async fn lookup(&self, query: &CredentialQuery) -> Result<Option<Found>, String> {
         let (search, field) = target(query);
+        if field.is_some_and(|f| f.starts_with(PICK_PREFIX)) && self.picker.is_none() {
+            warn!(search, "field picking is off; see the startup log for why");
+            return Ok(None);
+        }
         if let Some(c) = self.get(search, field).await? {
             return Ok(Some(c));
         }
@@ -90,29 +102,35 @@ impl Vault {
     async fn get(&self, search: &str, field: Option<&str>) -> Result<Option<Found>, String> {
         let out = self.bw(&["get", "item", search]).await?;
         if out.status.success() {
-            let credential = match field {
-                Some(LIST_FIELDS) => names_from_item(&out.stdout),
+            let (credential, shown) = match field {
+                Some(LIST_FIELDS) => (
+                    names_from_item(&out.stdout),
+                    Some(LIST_FIELDS_LABEL.to_string()),
+                ),
+                Some(f) if f.starts_with(PICK_PREFIX) => {
+                    match self
+                        .pick_field(&out.stdout, &f[PICK_PREFIX.len_utf8()..])
+                        .await
+                    {
+                        Some(name) => (
+                            field_from_item(&out.stdout, &name),
+                            Some(format!("{name}{PICKED_MARK}")),
+                        ),
+                        None => (None, None),
+                    }
+                }
                 Some(name) => {
                     let found = field_from_item(&out.stdout, name);
                     if found.is_none() {
                         info!(search, field = name, present = ?field_names(&out.stdout), "item has no such field");
                     }
-                    found
+                    (found, Some(name.to_string()))
                 }
-                None => credential_from_item(&out.stdout),
+                None => (credential_from_item(&out.stdout), None),
             };
             return Ok(credential.map(|credential| Found {
                 credential,
-                summary: summary(
-                    item_name(&out.stdout).as_deref(),
-                    field.map(|f| {
-                        if f == LIST_FIELDS {
-                            LIST_FIELDS_LABEL
-                        } else {
-                            f
-                        }
-                    }),
-                ),
+                summary: summary(item_name(&out.stdout).as_deref(), shown.as_deref()),
             }));
         }
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -121,6 +139,15 @@ impl Vault {
         } else {
             Err(format!("bw get item failed: {}", stderr.trim()))
         }
+    }
+
+    async fn pick_field(&self, item: &[u8], need: &str) -> Option<String> {
+        let picker = self.picker.as_ref()?;
+        let names = named_fields(item);
+        if names.is_empty() || need.trim().is_empty() {
+            return None;
+        }
+        picker.pick(&names, need.trim()).await
     }
 
     async fn bw(&self, args: &[&str]) -> Result<std::process::Output, String> {
@@ -242,10 +269,7 @@ fn field_from_item(json: &[u8], name: &str) -> Option<CredentialData> {
 }
 
 fn names_from_item(json: &[u8]) -> Option<CredentialData> {
-    let names: Vec<String> = field_names(json)
-        .into_iter()
-        .filter(|n| !n.is_empty())
-        .collect();
+    let names = named_fields(json);
     (!names.is_empty()).then(|| CredentialData {
         username: None,
         password: Some(Zeroizing::new(names.join(", "))),
@@ -255,6 +279,13 @@ fn names_from_item(json: &[u8]) -> Option<CredentialData> {
         credential_id: None,
         domain: None,
     })
+}
+
+fn named_fields(json: &[u8]) -> Vec<String> {
+    field_names(json)
+        .into_iter()
+        .filter(|n| !n.is_empty())
+        .collect()
 }
 
 fn item_name(json: &[u8]) -> Option<String> {
