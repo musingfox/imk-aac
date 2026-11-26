@@ -1,12 +1,16 @@
+mod bitwarden;
 mod storage;
 
+use std::sync::Arc;
+
 use ap_client::{
-    ConnectionStore, CredentialData, CredentialRequestReply, DefaultProxyClient,
-    FingerprintVerificationReply, UserClient, UserClientNotification, UserClientRequest,
+    ConnectionStore, CredentialRequestReply, DefaultProxyClient, FingerprintVerificationReply,
+    UserClient, UserClientNotification, UserClientRequest,
 };
 use tokio::process::Command;
 use tracing::{error, info, warn};
 
+use bitwarden::Vault;
 use storage::{FileConnectionCache, FileIdentityStorage};
 
 // Same storage name as `aac listen`, so its identity and paired connections are reused.
@@ -34,6 +38,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("no paired connection; pair once with `aac listen` first".into());
     }
 
+    let vault = Arc::new(Vault::unlock().await?);
+    vault.sync().await?;
+
     let proxy = Box::new(DefaultProxyClient::from_url(PROXY_URL.to_string()));
     // No PSK store and no token requests: this listener never opens a new pairing.
     let handle = UserClient::connect(identity, Box::new(connections), proxy, None, None).await?;
@@ -54,12 +61,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let _ = reply.send(FingerprintVerificationReply { approved: false, name: None });
                 }
                 UserClientRequest::CredentialRequest { query, reply, .. } => {
+                    let vault = Arc::clone(&vault);
                     tokio::spawn(async move {
-                        let approved = touch_approved(&query.to_string()).await;
+                        let label = query.to_string();
+                        let credential = match vault.lookup(query.search_string()).await {
+                            Ok(Some(c)) => Some(c),
+                            Ok(None) => {
+                                warn!(query = label, "not found in vault; denied without asking");
+                                None
+                            }
+                            Err(e) => {
+                                error!(query = label, "{e}");
+                                None
+                            }
+                        };
+                        let credential = match credential {
+                            Some(c) if touch_approved(&label).await => Some(c),
+                            _ => None,
+                        };
+                        let credential_id = credential.as_ref().and_then(|c| c.credential_id.clone());
                         let _ = reply.send(CredentialRequestReply {
-                            approved,
-                            credential: approved.then(stub_credential),
-                            credential_id: None,
+                            approved: credential.is_some(),
+                            credential,
+                            credential_id,
                         });
                     });
                 }
@@ -89,18 +113,5 @@ async fn touch_approved(query: &str) -> bool {
             error!(query, "cannot run {IMK}: {e}");
             false
         }
-    }
-}
-
-// Stub credential source until M2 wires in Bitwarden.
-fn stub_credential() -> CredentialData {
-    CredentialData {
-        username: Some("imk-aac-stub".to_string()),
-        password: Some("imk-aac-stub-password".to_string().into()),
-        totp: None,
-        uri: None,
-        notes: None,
-        credential_id: None,
-        domain: None,
     }
 }
