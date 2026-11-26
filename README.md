@@ -2,6 +2,8 @@
 
 imk-aac replaces `aac listen` from [Bitwarden Agent Access](https://github.com/bitwarden/agent-access) on macOS. Every `aac run` request is approved with a touch on an immurok fingerprint key, not by pressing `y` in a terminal. The vault is unlocked once at login, also with one touch.
 
+<p align="center"><img src="docs/panel.png" width="440" alt="The approval panel: Claude Code asks for the api-token field of the github item, with a Deny button and a countdown"></p>
+
 ## How a request flows
 
 1. An agent runs `aac run --id <item> -- <command>`, unchanged from upstream.
