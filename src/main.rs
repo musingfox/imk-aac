@@ -64,7 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let vault = Arc::clone(&vault);
                     tokio::spawn(async move {
                         let label = query.to_string();
-                        let credential = match vault.lookup(query.search_string()).await {
+                        let credential = match vault.lookup(&query).await {
                             Ok(Some(c)) => Some(c),
                             Ok(None) => {
                                 warn!(query = label, "not found in vault; denied without asking");

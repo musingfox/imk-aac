@@ -1,7 +1,7 @@
 use std::process::Stdio;
 use std::time::Duration;
 
-use ap_client::CredentialData;
+use ap_client::{CredentialData, CredentialQuery};
 use serde::Deserialize;
 use tokio::process::Command;
 use tracing::{info, warn};
@@ -62,19 +62,33 @@ impl Vault {
 
     /// Looks the item up, and on a miss syncs once and looks again, so items
     /// added on other devices are found without restarting.
-    pub async fn lookup(&self, search: &str) -> Result<Option<CredentialData>, String> {
-        if let Some(c) = self.get(search).await? {
+    pub async fn lookup(&self, query: &CredentialQuery) -> Result<Option<CredentialData>, String> {
+        let (search, field) = target(query);
+        if let Some(c) = self.get(search, field).await? {
             return Ok(Some(c));
         }
-        info!(search, "not found; syncing and retrying");
+        info!(search, field, "not found; syncing and retrying");
         self.sync().await?;
-        self.get(search).await
+        self.get(search, field).await
     }
 
-    async fn get(&self, search: &str) -> Result<Option<CredentialData>, String> {
+    async fn get(
+        &self,
+        search: &str,
+        field: Option<&str>,
+    ) -> Result<Option<CredentialData>, String> {
         let out = self.bw(&["get", "item", search]).await?;
         if out.status.success() {
-            return Ok(credential_from_item(&out.stdout));
+            return Ok(match field {
+                Some(name) => {
+                    let found = field_from_item(&out.stdout, name);
+                    if found.is_none() {
+                        info!(search, field = name, present = ?field_names(&out.stdout), "item has no such field");
+                    }
+                    found
+                }
+                None => credential_from_item(&out.stdout),
+            });
         }
         let stderr = String::from_utf8_lossy(&out.stderr);
         if stderr.contains("Not found") {
@@ -122,10 +136,31 @@ async fn master_password() -> Result<Zeroizing<String>, String> {
     ))
 }
 
+/// `--id <item>:<field>` asks for one custom field. The protocol has no custom
+/// field slot (upstream issue #160), so the value travels as the password.
+/// Only Id queries are split: a Domain like `host:8080` keeps its colon.
+fn target(query: &CredentialQuery) -> (&str, Option<&str>) {
+    match query {
+        CredentialQuery::Id(id) => match id.split_once(':') {
+            Some((item, field)) if !item.is_empty() && !field.is_empty() => (item, Some(field)),
+            _ => (id, None),
+        },
+        other => (other.search_string(), None),
+    }
+}
+
 #[derive(Deserialize)]
 struct BwItem {
     id: Option<String>,
     login: Option<BwLogin>,
+    #[serde(default)]
+    fields: Vec<BwField>,
+}
+
+#[derive(Deserialize)]
+struct BwField {
+    name: Option<String>,
+    value: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -162,6 +197,30 @@ fn credential_from_item(json: &[u8]) -> Option<CredentialData> {
     })
 }
 
+fn field_from_item(json: &[u8], name: &str) -> Option<CredentialData> {
+    let item: BwItem = serde_json::from_slice(json).ok()?;
+    let value = item
+        .fields
+        .into_iter()
+        .find(|f| f.name.as_deref() == Some(name))?
+        .value?;
+    Some(CredentialData {
+        username: None,
+        password: Some(Zeroizing::new(value)),
+        totp: None,
+        uri: None,
+        notes: None,
+        credential_id: item.id,
+        domain: None,
+    })
+}
+
+fn field_names(json: &[u8]) -> Vec<String> {
+    serde_json::from_slice::<BwItem>(json)
+        .map(|item| item.fields.into_iter().filter_map(|f| f.name).collect())
+        .unwrap_or_default()
+}
+
 fn domain_from_uri(uri: &str) -> Option<String> {
     let rest = uri.split_once("://").map_or(uri, |(_, r)| r);
     let rest = rest.split_once('@').map_or(rest, |(_, r)| r);
@@ -186,5 +245,35 @@ mod tests {
     #[test]
     fn item_without_login_is_not_a_credential() {
         assert!(credential_from_item(br#"{"id":"abc","type":2}"#).is_none());
+    }
+
+    const ITEM_WITH_FIELDS: &[u8] =
+        br#"{"id":"abc","type":2,"fields":[{"name":"token","value":"t0k","type":1},{"name":"empty","value":null,"type":0}]}"#;
+
+    #[test]
+    fn named_field_becomes_the_password() {
+        let c = field_from_item(ITEM_WITH_FIELDS, "token").expect("field");
+        assert_eq!(c.password.as_deref().map(String::as_str), Some("t0k"));
+        assert_eq!(c.credential_id.as_deref(), Some("abc"));
+        assert!(c.username.is_none());
+    }
+
+    #[test]
+    fn missing_or_valueless_field_is_not_found() {
+        assert!(field_from_item(ITEM_WITH_FIELDS, "nope").is_none());
+        assert!(field_from_item(ITEM_WITH_FIELDS, "empty").is_none());
+        assert!(field_from_item(br#"{"id":"abc"}"#, "token").is_none());
+    }
+
+    #[test]
+    fn only_id_queries_carry_a_field() {
+        let id = |s: &str| CredentialQuery::Id(s.to_string());
+        assert_eq!(target(&id("abc:token")), ("abc", Some("token")));
+        assert_eq!(target(&id("abc:a:b")), ("abc", Some("a:b")));
+        assert_eq!(target(&id("abc")), ("abc", None));
+        assert_eq!(target(&id("abc:")), ("abc:", None));
+        assert_eq!(target(&id(":token")), (":token", None));
+        let domain = CredentialQuery::Domain("host:8080".to_string());
+        assert_eq!(target(&domain), ("host:8080", None));
     }
 }
