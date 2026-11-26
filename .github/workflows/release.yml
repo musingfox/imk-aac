@@ -1,0 +1,36 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    # A native macOS runner: the binary links Security.framework through
+    # native-tls, so cross-compiling from Linux would need the macOS SDK.
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Package
+        run: |
+          file target/release/imk-aac | grep -q arm64
+          tar -czf imk-aac-macos-aarch64.tar.gz -C target/release imk-aac
+          shasum -a 256 imk-aac-macos-aarch64.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "$GITHUB_REF_NAME" imk-aac-macos-aarch64.tar.gz SHA256SUMS --verify-tag --generate-notes
