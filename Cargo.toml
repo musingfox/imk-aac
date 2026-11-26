@@ -12,6 +12,7 @@ ap-noise = "=0.11.0"
 ap-proxy-protocol = "=0.11.0"
 async-trait = "0.1"
 dirs = "5.0"
+libc = "0.2"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.36", features = ["rt-multi-thread", "macros", "process", "time", "io-util"] }

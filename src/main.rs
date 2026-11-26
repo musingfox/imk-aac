@@ -1,4 +1,6 @@
 mod bitwarden;
+mod overlay;
+mod panel;
 mod picker;
 mod storage;
 
@@ -8,10 +10,10 @@ use ap_client::{
     ConnectionStore, CredentialRequestReply, DefaultProxyClient, FingerprintVerificationReply,
     UserClient, UserClientNotification, UserClientRequest,
 };
-use tokio::process::Command;
 use tracing::{error, info, warn};
 
-use bitwarden::Vault;
+use bitwarden::{Found, Vault};
+use panel::{Outcome, Panel};
 use picker::Picker;
 use storage::{FileConnectionCache, FileIdentityStorage};
 
@@ -19,6 +21,12 @@ use storage::{FileConnectionCache, FileIdentityStorage};
 const STORAGE_NAME: &str = "user_client";
 const PROXY_URL: &str = "wss://ap.lesspassword.dev";
 const IMK: &str = "/usr/local/bin/imk";
+const PROVIDER: &str = "Bitwarden";
+// Stub until the requester can be detected.
+const AGENT: &str = "Agent";
+// How long `imk run --agent` waits for a touch (measured), so the panel's
+// countdown ends with it.
+const TOUCH_TIMEOUT_SECS: u64 = 30;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -83,7 +91,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         };
                         let credential = match found {
-                            Some(f) if touch_approved(&label, &f.summary).await => Some(f.credential),
+                            Some(f) if touch_approved(&label, &f).await => Some(f.credential),
                             _ => None,
                         };
                         let credential_id = credential.as_ref().and_then(|c| c.credential_id.clone());
@@ -100,30 +108,71 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-/// The overlay shows the gated command, so `true` carries the summary as an
-/// ignored argument to tell the user what the touch releases.
-async fn touch_approved(query: &str, summary: &str) -> bool {
+/// The touch on immurok approves, as before; the panel can only deny, by its
+/// Deny button or when its countdown ends.
+async fn touch_approved(query: &str, found: &Found) -> bool {
+    let summary = found.summary();
     info!(
         query,
         summary, "credential request; waiting for immurok touch"
     );
-    match Command::new(IMK)
-        .args(["run", "--agent", "--", "/usr/bin/true", summary])
+    let mut imk = match overlay::imk_run(IMK, &summary)
         .stdin(std::process::Stdio::null())
-        .status()
-        .await
+        .kill_on_drop(true)
+        .spawn()
     {
-        Ok(status) if status.success() => {
-            info!(query, "approved");
-            true
-        }
-        Ok(status) => {
-            warn!(query, code = ?status.code(), "denied");
-            false
-        }
+        Ok(child) => child,
         Err(e) => {
             error!(query, "cannot run {IMK}: {e}");
-            false
+            return false;
+        }
+    };
+    let mut panel = Panel::show(&panel::Request {
+        provider: PROVIDER,
+        item: &found.item,
+        field: &found.field,
+        picked: found.picked,
+        agent: AGENT,
+        command: query,
+        timeout_secs: TOUCH_TIMEOUT_SECS,
+    })
+    .await;
+    loop {
+        tokio::select! {
+            status = imk.wait() => {
+                if let Some(p) = panel.take() {
+                    p.close().await;
+                }
+                return match status {
+                    Ok(status) if status.success() => {
+                        info!(query, "approved");
+                        true
+                    }
+                    Ok(status) => {
+                        warn!(query, code = ?status.code(), "denied");
+                        false
+                    }
+                    Err(e) => {
+                        error!(query, "cannot wait for {IMK}: {e}");
+                        false
+                    }
+                };
+            }
+            outcome = panel::outcome(&mut panel) => match outcome {
+                Outcome::Denied | Outcome::TimedOut => {
+                    let _ = imk.kill().await;
+                    if matches!(outcome, Outcome::Denied) {
+                        warn!(query, "denied by user");
+                    } else {
+                        warn!(query, "timed out");
+                    }
+                    return false;
+                }
+                Outcome::Failed(code) => {
+                    warn!(query, ?code, "approval panel failed; touch gate alone");
+                    panel = None;
+                }
+            },
         }
     }
 }

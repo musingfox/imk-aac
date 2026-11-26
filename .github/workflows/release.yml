@@ -23,10 +23,16 @@ jobs:
       - name: Build
         run: cargo build --release --locked
 
+      # glassEffect needs the macOS 26 SDK, which macos-latest's default Xcode (26.6) has;
+      # -target keeps the binary runnable on any macOS 26, not just the runner's point release.
+      - name: Build panel
+        run: xcrun swiftc -O -target arm64-apple-macos26.0 panel/main.swift -o target/release/imk-aac-panel
+
       - name: Package
         run: |
           file target/release/imk-aac | grep -q arm64
-          tar -czf imk-aac-macos-aarch64.tar.gz -C target/release imk-aac
+          file target/release/imk-aac-panel | grep -q arm64
+          tar -czf imk-aac-macos-aarch64.tar.gz -C target/release imk-aac imk-aac-panel
           shasum -a 256 imk-aac-macos-aarch64.tar.gz > SHA256SUMS
           cat SHA256SUMS
 

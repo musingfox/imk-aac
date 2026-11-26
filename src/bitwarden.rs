@@ -35,10 +35,33 @@ const LIST_FIELDS_LABEL: &str = "欄位名稱清單";
 const PICK_PREFIX: char = '~';
 const PICKED_MARK: &str = "（自動選擇）";
 
-/// A credential and the line the approval overlay shows for it.
+/// A credential and what the approval overlay and panel show for it.
 pub struct Found {
     pub credential: CredentialData,
-    pub summary: String,
+    pub item: String,
+    pub field: String,
+    pub picked: bool,
+}
+
+impl Found {
+    fn new(
+        credential: CredentialData,
+        item: Option<&str>,
+        field: Option<&str>,
+        picked: bool,
+    ) -> Self {
+        let clean = |s: &str| s.chars().filter(|c| !c.is_control()).collect::<String>();
+        Self {
+            credential,
+            item: clean(item.unwrap_or("?")),
+            field: clean(field.unwrap_or("login")),
+            picked,
+        }
+    }
+
+    pub fn summary(&self) -> String {
+        summary(&self.item, &self.field, self.picked)
+    }
 }
 
 pub struct Vault {
@@ -105,21 +128,19 @@ impl Vault {
     async fn get(&self, search: &str, field: Option<&str>) -> Result<Option<Found>, String> {
         let out = self.bw(&["get", "item", search]).await?;
         if out.status.success() {
-            let (credential, shown) = match field {
+            let (credential, shown, picked) = match field {
                 Some(LIST_FIELDS) => (
                     names_from_item(&out.stdout),
                     Some(LIST_FIELDS_LABEL.to_string()),
+                    false,
                 ),
                 Some(f) if f.starts_with(PICK_PREFIX) => {
                     match self
                         .pick_field(&out.stdout, &f[PICK_PREFIX.len_utf8()..])
                         .await
                     {
-                        Some(name) => (
-                            field_from_item(&out.stdout, &name),
-                            Some(format!("{name}{PICKED_MARK}")),
-                        ),
-                        None => (None, None),
+                        Some(name) => (field_from_item(&out.stdout, &name), Some(name), true),
+                        None => (None, None, false),
                     }
                 }
                 Some(name) => {
@@ -127,13 +148,13 @@ impl Vault {
                     if found.is_none() {
                         info!(search, field = name, present = ?field_names(&out.stdout), "item has no such field");
                     }
-                    (found, Some(name.to_string()))
+                    (found, Some(name.to_string()), false)
                 }
-                None => (credential_from_item(&out.stdout), None),
+                None => (credential_from_item(&out.stdout), None, false),
             };
-            return Ok(credential.map(|credential| Found {
-                credential,
-                summary: summary(item_name(&out.stdout).as_deref(), shown.as_deref()),
+            let item = item_name(&out.stdout);
+            return Ok(credential.map(|credential| {
+                Found::new(credential, item.as_deref(), shown.as_deref(), picked)
             }));
         }
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -295,21 +316,23 @@ fn item_name(json: &[u8]) -> Option<String> {
     serde_json::from_slice::<BwItem>(json).ok()?.name
 }
 
-/// "<item name> / <field>", or "/ login" when the whole login is released.
-/// The item name is cut first so the field always stays visible.
-fn summary(item: Option<&str>, field: Option<&str>) -> String {
-    let clean = |s: &str| s.chars().filter(|c| !c.is_control()).collect::<String>();
-    let field = clean(field.unwrap_or("login"));
-    let item = clean(item.unwrap_or("?"));
+/// "<item name> › <field>", the field marked when a model picked it. The item
+/// name is cut first so the field always stays visible.
+fn summary(item: &str, field: &str, picked: bool) -> String {
+    let field = if picked {
+        format!("{field}{PICKED_MARK}")
+    } else {
+        field.to_string()
+    };
     let room = SUMMARY_MAX_CHARS
         .saturating_sub(field.chars().count() + 3)
         .max(8);
     let item = if item.chars().count() > room {
         item.chars().take(room - 1).chain(['…']).collect()
     } else {
-        item
+        item.to_string()
     };
-    format!("{item} / {field}")
+    format!("{item} › {field}")
 }
 
 fn field_names(json: &[u8]) -> Vec<String> {
@@ -375,17 +398,50 @@ mod tests {
         assert!(names_from_item(br#"{"id":"abc","fields":[{"name":"","value":"v"}]}"#).is_none());
     }
 
+    fn found(item: Option<&str>, field: Option<&str>, picked: bool) -> Found {
+        let credential = CredentialData {
+            username: None,
+            password: None,
+            totp: None,
+            uri: None,
+            notes: None,
+            credential_id: None,
+            domain: None,
+        };
+        Found::new(credential, item, field, picked)
+    }
+
     #[test]
     fn summary_names_item_and_field() {
-        assert_eq!(summary(Some("GitHub"), Some("token")), "GitHub / token");
-        assert_eq!(summary(Some("GitHub"), None), "GitHub / login");
-        assert_eq!(summary(None, None), "? / login");
+        assert_eq!(
+            found(Some("GitHub"), Some("token"), false).summary(),
+            "GitHub › token"
+        );
+        assert_eq!(
+            found(Some("GitHub"), None, false).summary(),
+            "GitHub › login"
+        );
+        assert_eq!(found(None, None, false).summary(), "? › login");
+        assert_eq!(
+            found(Some("GitHub"), Some(LIST_FIELDS_LABEL), false).summary(),
+            format!("GitHub › {LIST_FIELDS_LABEL}")
+        );
+    }
+
+    #[test]
+    fn picked_field_is_marked_in_the_summary_only() {
+        let f = found(Some("Cloudflare"), Some("api-token"), true);
+        assert_eq!(f.summary(), format!("Cloudflare › api-token{PICKED_MARK}"));
+        assert_eq!(f.field, "api-token");
+        assert!(f.picked);
     }
 
     #[test]
     fn summary_cuts_the_item_name_first_and_drops_control_chars() {
-        let s = summary(Some(&"n".repeat(100)), Some("api\ntoken"));
-        assert!(s.ends_with(" / apitoken"), "{s}");
+        let f = found(Some(&"n".repeat(100)), Some("api\ntoken"), false);
+        assert_eq!(f.field, "apitoken");
+        let s = f.summary();
+        assert!(s.ends_with(" › apitoken"), "{s}");
         assert!(s.chars().count() <= SUMMARY_MAX_CHARS, "{s}");
         assert!(s.contains('…'));
     }
