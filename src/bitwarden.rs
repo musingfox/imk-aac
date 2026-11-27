@@ -79,7 +79,7 @@ pub struct Vault {
 }
 
 impl Vault {
-    pub async fn unlock(picker: Option<Picker>) -> Result<Self, String> {
+    pub async fn unlock(picker: Option<Picker>) -> Result<Self, UnlockError> {
         let master = master_password().await?;
         let out = Command::new(BW)
             .args([
@@ -100,7 +100,8 @@ impl Vault {
             return Err(format!(
                 "bw unlock failed: {}",
                 String::from_utf8_lossy(&out.stderr).trim()
-            ));
+            )
+            .into());
         }
         Ok(Self {
             session,
@@ -228,7 +229,32 @@ enum Attempt {
     Denied,
 }
 
-async fn master_password() -> Result<Zeroizing<String>, String> {
+/// Why the boot unlock stopped. A denial is a deliberate no, so the caller
+/// must tell it apart from a failure without parsing the message.
+#[derive(Debug, PartialEq, Eq)]
+pub enum UnlockError {
+    Denied,
+    Failed(String),
+}
+
+impl std::fmt::Display for UnlockError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Denied => f.write_str("Bitwarden unlock denied in the approval panel"),
+            Self::Failed(why) => f.write_str(why),
+        }
+    }
+}
+
+impl std::error::Error for UnlockError {}
+
+impl From<String> for UnlockError {
+    fn from(why: String) -> Self {
+        Self::Failed(why)
+    }
+}
+
+async fn master_password() -> Result<Zeroizing<String>, UnlockError> {
     for attempt in 1..=UNLOCK_ATTEMPTS {
         info!(attempt, "touch immurok to unlock Bitwarden");
         let imk = overlay::imk_run_self(IMK, UNLOCK_TEXT, &[IMK, "get", MASTER_KEY_URL])
@@ -242,16 +268,14 @@ async fn master_password() -> Result<Zeroizing<String>, String> {
         match released(imk, panel, attempt).await {
             Attempt::Released(master) => return Ok(master),
             // Retries are for a BLE link not yet up, not for overriding a no.
-            Attempt::Denied => return Err("Bitwarden unlock denied in the approval panel".into()),
+            Attempt::Denied => return Err(UnlockError::Denied),
             Attempt::Failed => {}
         }
         if attempt < UNLOCK_ATTEMPTS {
             tokio::time::sleep(UNLOCK_RETRY_DELAY).await;
         }
     }
-    Err(format!(
-        "immurok did not release {MASTER_KEY_URL} after {UNLOCK_ATTEMPTS} attempts"
-    ))
+    Err(format!("immurok did not release {MASTER_KEY_URL} after {UNLOCK_ATTEMPTS} attempts").into())
 }
 
 fn unlock_request() -> panel::Request<'static> {
@@ -632,6 +656,16 @@ echo "Not found." >&2; exit 1"#;
             released(sh("exit 0"), None, 1).await,
             Attempt::Failed
         ));
+    }
+
+    #[test]
+    fn denial_is_distinct_from_other_unlock_errors() {
+        let failed = UnlockError::from("bw unlock failed: x".to_string());
+        assert_ne!(UnlockError::Denied, failed);
+        assert!(matches!(failed, UnlockError::Failed(_)));
+        // Even a failure that quotes the denial text stays a failure.
+        let lookalike = UnlockError::from(UnlockError::Denied.to_string());
+        assert!(!matches!(lookalike, UnlockError::Denied));
     }
 
     #[tokio::test]

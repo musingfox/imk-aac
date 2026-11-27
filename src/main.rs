@@ -13,7 +13,7 @@ use ap_client::{
 };
 use tracing::{error, info, warn};
 
-use bitwarden::{Found, Vault};
+use bitwarden::{Found, UnlockError, Vault};
 use panel::{Outcome, Panel};
 use picker::Picker;
 use requester::Requester;
@@ -61,7 +61,16 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
         None
     });
     info!(enabled = picker.is_some(), "field picking");
-    let vault = Arc::new(Vault::unlock(picker).await?);
+    let vault = match Vault::unlock(picker).await {
+        Ok(vault) => Arc::new(vault),
+        // Exit 0 so launchd's KeepAlive SuccessfulExit=false does not relaunch
+        // and ask for the fingerprint again after a deliberate no.
+        Err(UnlockError::Denied) => {
+            warn!("Bitwarden unlock denied in the approval panel; exiting without a listener");
+            return Ok(());
+        }
+        Err(e) => return Err(e.into()),
+    };
     vault.boot_sync().await;
 
     let proxy = Box::new(DefaultProxyClient::from_url(PROXY_URL.to_string()));
