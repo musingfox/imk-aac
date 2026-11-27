@@ -63,7 +63,7 @@ The paths are fixed on purpose. A planted `imk` or `bw` earlier on `PATH` would 
 
 ## Usage
 
-Requests use the upstream `aac run`.
+Requests use the upstream `aac run`. [skills/imk-aac/SKILL.md](skills/imk-aac/SKILL.md) is an agent skill that teaches this usage; link it into your agent's skills directory.
 
 | Request | Returns |
 |---|---|

@@ -12,6 +12,7 @@ Guidance for coding agents working in this repository. User-facing behaviour is 
 - `src/requester.rs` finds the local `aac run` behind a request and its agent, through libproc and `KERN_PROCARGS2`.
 - `src/storage/` reads the `aac listen` pairing in `~/.access-protocol`. It is derived from upstream; keep NOTICE accurate.
 - `panel/main.swift` is the SwiftUI approval panel, one file built with `swiftc`.
+- `skills/imk-aac/SKILL.md` teaches agents to request secrets with `aac run`. Update it when the request syntax or approval flow changes.
 
 ## Invariants
 
