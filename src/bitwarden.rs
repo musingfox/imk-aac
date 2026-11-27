@@ -67,6 +67,8 @@ impl Found {
 pub struct Vault {
     session: Zeroizing<String>,
     picker: Option<Picker>,
+    // A field only so tests can point at a stub; production always uses BW.
+    bw: &'static str,
 }
 
 impl Vault {
@@ -93,7 +95,11 @@ impl Vault {
                 String::from_utf8_lossy(&out.stderr).trim()
             ));
         }
-        Ok(Self { session, picker })
+        Ok(Self {
+            session,
+            picker,
+            bw: BW,
+        })
     }
 
     pub async fn sync(&self) -> Result<(), String> {
@@ -106,6 +112,20 @@ impl Vault {
                 "bw sync failed: {}",
                 String::from_utf8_lossy(&out.stderr).trim()
             ))
+        }
+    }
+
+    /// Syncs at startup without making a failure fatal: exiting would make
+    /// launchd restart the daemon, and every restart asks for the fingerprint
+    /// again. After unlock `bw` serves from its local cache, and a lookup miss
+    /// syncs again anyway.
+    pub async fn boot_sync(&self) -> bool {
+        match self.sync().await {
+            Ok(()) => true,
+            Err(e) => {
+                warn!("boot sync failed, continuing with the local cache: {e}");
+                false
+            }
         }
     }
 
@@ -175,13 +195,13 @@ impl Vault {
     }
 
     async fn bw(&self, args: &[&str]) -> Result<std::process::Output, String> {
-        Command::new(BW)
+        Command::new(self.bw)
             .args(args)
             .env("BW_SESSION", self.session.as_str())
             .stdin(Stdio::null())
             .output()
             .await
-            .map_err(|e| format!("cannot run {BW}: {e}"))
+            .map_err(|e| format!("cannot run {}: {e}", self.bw))
     }
 }
 
@@ -456,5 +476,45 @@ mod tests {
         assert_eq!(target(&id(":token")), (":token", None));
         let domain = CredentialQuery::Domain("host:8080".to_string());
         assert_eq!(target(&domain), ("host:8080", None));
+    }
+
+    // Leaked so the stub path has the 'static lifetime Vault::bw wants.
+    fn stub_vault(name: &str, script: &str) -> Vault {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("imk-aac-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bw");
+        std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        Vault {
+            session: Zeroizing::new("s".to_string()),
+            picker: None,
+            bw: Box::leak(path.to_string_lossy().into_owned().into_boxed_str()),
+        }
+    }
+
+    const SYNC_TIMEOUT_STUB: &str = r#"
+if [ "$1" = sync ]; then echo "connect ETIMEDOUT" >&2; exit 1; fi
+if [ "$2" = item ] && [ "$3" = present ]; then
+  echo '{"id":"i","name":"present","login":{"password":"p"}}'; exit 0
+fi
+echo "Not found." >&2; exit 1"#;
+
+    #[tokio::test]
+    async fn failed_boot_sync_is_not_an_error() {
+        let vault = stub_vault("boot", SYNC_TIMEOUT_STUB);
+        assert!(!vault.boot_sync().await);
+        let ok = stub_vault("boot-ok", "exit 0");
+        assert!(ok.boot_sync().await);
+    }
+
+    #[tokio::test]
+    async fn lookup_with_failed_sync_errs_and_the_vault_keeps_serving() {
+        let vault = stub_vault("lookup", SYNC_TIMEOUT_STUB);
+        let id = |s: &str| CredentialQuery::Id(s.to_string());
+        let err = vault.lookup(&id("missing")).await.err().expect("denied");
+        assert!(err.contains("bw sync failed"), "{err}");
+        let hit = vault.lookup(&id("present")).await.unwrap();
+        assert!(hit.is_some());
     }
 }

@@ -54,7 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     info!(enabled = picker.is_some(), "field picking");
     let vault = Arc::new(Vault::unlock(picker).await?);
-    vault.sync().await?;
+    vault.boot_sync().await;
 
     let proxy = Box::new(DefaultProxyClient::from_url(PROXY_URL.to_string()));
     // No PSK store and no token requests: this listener never opens a new pairing.
