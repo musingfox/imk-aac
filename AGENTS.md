@@ -7,7 +7,7 @@ Guidance for coding agents working in this repository. User-facing behaviour is 
 - `src/main.rs` holds startup and the request loop. `touch_approved` races `imk run --agent` against the panel.
 - `src/bitwarden.rs` covers the vault: the boot unlock through immurok, `bw` lookups, the sync-and-retry, and the field syntax (`:field`, `:?`, `:~need`).
 - `src/picker.rs` is the optional local-model field picker, an OpenAI-compatible client over `/usr/bin/curl`.
-- `src/overlay.rs` makes immurok's overlay read `Bitwarden …`, using a private PATH dir that holds a `Bitwarden` symlink to `/usr/bin/true`.
+- `src/overlay.rs` makes immurok's overlay read `Bitwarden …`, using a private PATH dir that holds a `Bitwarden` symlink to `/usr/bin/true`. For the boot unlock, a second private dir links `Bitwarden` to imk-aac itself, which then execs `imk get` by absolute path; a failed check falls back to gating `imk get` directly.
 - `src/panel.rs` spawns `imk-aac-panel` and maps its exit code.
 - `src/requester.rs` finds the local `aac run` behind a request and its agent, through libproc and `KERN_PROCARGS2`.
 - `src/storage/` reads the `aac listen` pairing in `~/.access-protocol`. It is derived from upstream; keep NOTICE accurate.

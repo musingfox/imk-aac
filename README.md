@@ -59,7 +59,7 @@ The paths are fixed on purpose. A planted `imk` or `bw` earlier on `PATH` would 
 </plist>
 ```
 
-5. Load it with `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.musingfox.imk-aac.plist`. When immurok's overlay asks to read `imk://api/bitwarden`, touch the key once. If immurok is not yet connected at login, imk-aac tries up to five times, ten seconds apart.
+5. Load it with `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.musingfox.imk-aac.plist`. immurok's overlay reads `Bitwarden 解鎖密碼庫`, and the approval panel beside it says the vault is being unlocked; touch the key once. Deny in the panel stops the unlock. If immurok is not yet connected at login, imk-aac tries up to five times, ten seconds apart.
 
 ## Usage
 

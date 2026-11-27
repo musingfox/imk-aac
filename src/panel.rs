@@ -25,6 +25,8 @@ pub struct Request<'a> {
     /// Shown in the command box when the command is unknown.
     pub query: &'a str,
     pub timeout_secs: u64,
+    /// The boot unlock: item is the immurok key, and there is no field, agent or command.
+    pub unlock: bool,
 }
 
 pub enum Outcome {
@@ -64,6 +66,11 @@ impl Panel {
 
     pub async fn close(mut self) {
         let _ = self.0.kill().await;
+    }
+
+    #[cfg(test)]
+    pub fn stub(child: Child) -> Self {
+        Self(child)
     }
 }
 

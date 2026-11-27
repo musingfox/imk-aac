@@ -3,10 +3,12 @@ use std::time::Duration;
 
 use ap_client::{CredentialData, CredentialQuery};
 use serde::Deserialize;
-use tokio::process::Command;
+use tokio::process::{Child, Command};
 use tracing::{info, warn};
 use zeroize::Zeroizing;
 
+use crate::overlay;
+use crate::panel::{self, Outcome, Panel};
 use crate::picker::Picker;
 
 // Absolute paths: a planted bw or imk earlier on PATH would otherwise receive
@@ -20,6 +22,11 @@ const MASTER_KEY_URL: &str = "imk://api/bitwarden";
 // At boot immurok's BLE link may not be up yet, so a failed attempt is retried.
 const UNLOCK_ATTEMPTS: u32 = 5;
 const UNLOCK_RETRY_DELAY: Duration = Duration::from_secs(10);
+/// What the overlay reads after `Bitwarden` while the boot unlock waits, and
+/// the argument by which the gated copy of this binary knows its job.
+pub const UNLOCK_TEXT: &str = "解鎖密碼庫";
+// The measured get ran with launchd's default PATH, not the overlay's private one.
+const LAUNCHD_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
 
 // immurok's overlay shows about two lines of the gated command and cuts the
 // rest (measured with immurok 1.6.11), so the summary is kept short.
@@ -205,24 +212,39 @@ impl Vault {
     }
 }
 
+/// The gated copy of this binary replaces itself with imk get, so the get stays
+/// imk run's own child, as measured, and its stdout goes straight to the pipe.
+pub fn exec_master_key_get() -> std::io::Error {
+    use std::os::unix::process::CommandExt;
+    std::process::Command::new(IMK)
+        .args(["get", MASTER_KEY_URL])
+        .env("PATH", LAUNCHD_PATH)
+        .exec()
+}
+
+enum Attempt {
+    Released(Zeroizing<String>),
+    Failed,
+    Denied,
+}
+
 async fn master_password() -> Result<Zeroizing<String>, String> {
     for attempt in 1..=UNLOCK_ATTEMPTS {
         info!(attempt, "touch immurok to unlock Bitwarden");
-        let out = Command::new(IMK)
-            .args(["run", "--agent", "--", IMK, "get", MASTER_KEY_URL])
+        let imk = overlay::imk_run_self(IMK, UNLOCK_TEXT, &[IMK, "get", MASTER_KEY_URL])
             .stdin(Stdio::null())
-            .output()
-            .await
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
             .map_err(|e| format!("cannot run {IMK}: {e}"))?;
-        let master = Zeroizing::new(
-            String::from_utf8_lossy(&out.stdout)
-                .trim_end_matches('\n')
-                .to_string(),
-        );
-        if out.status.success() && !master.is_empty() {
-            return Ok(master);
+        let panel = Panel::show(&unlock_request()).await;
+        match released(imk, panel, attempt).await {
+            Attempt::Released(master) => return Ok(master),
+            // Retries are for a BLE link not yet up, not for overriding a no.
+            Attempt::Denied => return Err("Bitwarden unlock denied in the approval panel".into()),
+            Attempt::Failed => {}
         }
-        warn!(attempt, code = ?out.status.code(), "unlock attempt failed: {}", String::from_utf8_lossy(&out.stderr).trim());
         if attempt < UNLOCK_ATTEMPTS {
             tokio::time::sleep(UNLOCK_RETRY_DELAY).await;
         }
@@ -230,6 +252,69 @@ async fn master_password() -> Result<Zeroizing<String>, String> {
     Err(format!(
         "immurok did not release {MASTER_KEY_URL} after {UNLOCK_ATTEMPTS} attempts"
     ))
+}
+
+fn unlock_request() -> panel::Request<'static> {
+    panel::Request {
+        provider: crate::PROVIDER,
+        item: MASTER_KEY_URL,
+        field: "",
+        picked: false,
+        origin: "local",
+        agent: None,
+        command: None,
+        query: MASTER_KEY_URL,
+        timeout_secs: crate::TOUCH_TIMEOUT_SECS,
+        unlock: true,
+    }
+}
+
+/// Only imk's own success releases the password; the panel can end the
+/// attempt, never approve it.
+async fn released(imk: Child, mut panel: Option<Panel>, attempt: u32) -> Attempt {
+    // Returning drops this wait, and kill_on_drop then kills imk.
+    let output = imk.wait_with_output();
+    tokio::pin!(output);
+    loop {
+        tokio::select! {
+            out = &mut output => {
+                if let Some(p) = panel.take() {
+                    p.close().await;
+                }
+                let out = match out {
+                    Ok(out) => out,
+                    Err(e) => {
+                        warn!(attempt, "cannot wait for {IMK}: {e}");
+                        return Attempt::Failed;
+                    }
+                };
+                let master = Zeroizing::new(
+                    String::from_utf8_lossy(&out.stdout)
+                        .trim_end_matches('\n')
+                        .to_string(),
+                );
+                if out.status.success() && !master.is_empty() {
+                    return Attempt::Released(master);
+                }
+                warn!(attempt, code = ?out.status.code(), "unlock attempt failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+                return Attempt::Failed;
+            }
+            outcome = panel::outcome(&mut panel) => match outcome {
+                Outcome::Denied => {
+                    warn!(attempt, "unlock denied by user");
+                    return Attempt::Denied;
+                }
+                Outcome::TimedOut => {
+                    warn!(attempt, "unlock timed out");
+                    return Attempt::Failed;
+                }
+                Outcome::Failed(code) => {
+                    warn!(attempt, ?code, "approval panel failed; touch gate alone");
+                    panel = None;
+                }
+            },
+        }
+    }
 }
 
 /// `--id <item>:<field>` asks for one custom field. The protocol has no custom
@@ -516,5 +601,69 @@ echo "Not found." >&2; exit 1"#;
         assert!(err.contains("bw sync failed"), "{err}");
         let hit = vault.lookup(&id("present")).await.unwrap();
         assert!(hit.is_some());
+    }
+
+    fn sh(script: &str) -> Child {
+        Command::new("/bin/sh")
+            .args(["-c", script])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap()
+    }
+
+    fn panel_exiting(code: i32) -> Option<Panel> {
+        Some(Panel::stub(sh(&format!("exit {code}"))))
+    }
+
+    #[tokio::test]
+    async fn only_imk_success_with_output_releases() {
+        match released(sh("printf 'pw\\n'"), None, 1).await {
+            Attempt::Released(m) => assert_eq!(m.as_str(), "pw"),
+            _ => panic!("not released"),
+        }
+        assert!(matches!(
+            released(sh("printf pw; exit 1"), None, 1).await,
+            Attempt::Failed
+        ));
+        assert!(matches!(
+            released(sh("exit 0"), None, 1).await,
+            Attempt::Failed
+        ));
+    }
+
+    #[tokio::test]
+    async fn panel_deny_ends_the_attempt_before_imk() {
+        let started = std::time::Instant::now();
+        let out = released(sh("sleep 20; printf pw"), panel_exiting(1), 1).await;
+        assert!(matches!(out, Attempt::Denied));
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    #[tokio::test]
+    async fn panel_countdown_fails_the_attempt() {
+        let out = released(sh("sleep 20; printf pw"), panel_exiting(2), 1).await;
+        assert!(matches!(out, Attempt::Failed));
+    }
+
+    #[tokio::test]
+    async fn no_panel_exit_approves() {
+        let out = released(sh("sleep 1; exit 1"), panel_exiting(0), 1).await;
+        assert!(matches!(out, Attempt::Failed));
+        match released(sh("sleep 1; printf pw"), panel_exiting(3), 1).await {
+            Attempt::Released(m) => assert_eq!(m.as_str(), "pw"),
+            _ => panic!("a failed panel must leave the touch gate alone"),
+        }
+    }
+
+    #[test]
+    fn unlock_panel_says_unlock_and_carries_no_command() {
+        let json = serde_json::to_value(unlock_request()).unwrap();
+        assert_eq!(json["unlock"], true);
+        assert_eq!(json["provider"], "Bitwarden");
+        assert_eq!(json["item"], MASTER_KEY_URL);
+        assert!(json["agent"].is_null() && json["command"].is_null());
     }
 }

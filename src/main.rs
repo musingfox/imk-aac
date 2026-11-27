@@ -28,8 +28,16 @@ const PROVIDER: &str = "Bitwarden";
 // countdown ends with it.
 const TOUCH_TIMEOUT_SECS: u64 = 30;
 
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Before any runtime or logging: this copy only exists to become imk get.
+    if overlay::gated_self(bitwarden::UNLOCK_TEXT) {
+        return Err(bitwarden::exec_master_key_get().into());
+    }
+    serve()
+}
+
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn serve() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -152,6 +160,7 @@ async fn touch_approved(query: &str, found: &Found, requester: &Requester) -> bo
         },
         query,
         timeout_secs: TOUCH_TIMEOUT_SECS,
+        unlock: false,
     })
     .await;
     loop {

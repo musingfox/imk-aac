@@ -10,6 +10,8 @@ struct Request: Decodable {
     let agent, command: String?
     let query: String
     let timeout_secs: Double
+    // Optional, so a request written before the boot unlock used the panel still decodes.
+    let unlock: Bool?
 }
 
 enum Exit: Int32 {
@@ -26,6 +28,7 @@ else {
 }
 let provider = request.provider, item = request.item, field = request.field, picked = request.picked
 let origin = request.origin
+let unlocking = request.unlock ?? false
 let command = request.command ?? request.query
 let total = request.timeout_secs
 let started = Date()
@@ -35,15 +38,20 @@ let strings: [String: [String: String]] = [
     "zh-Hant": ["title": "%@ 想取用一個密碼", "titleAny": "有 agent 想取用一個密碼", "from": "來源",
                 "remote": "遠端裝置", "ambiguous": "無法判斷", "hint": "摸 immurok 放行", "provider": "提供者", "item": "項目",
                 "field": "欄位", "picked": "自動選擇", "command": "指令", "deny": "拒絕",
-                "left": "%d 秒後自動拒絕", "more": "點一下看完整指令"],
+                "left": "%d 秒後自動拒絕", "more": "點一下看完整指令",
+                "unlockTitle": "開機解鎖 Bitwarden 密碼庫", "unlockHint": "摸 immurok 取出主密碼來解鎖",
+                "key": "主密碼", "unlockLeft": "%d 秒後放棄這次解鎖"],
     "en": ["title": "%@ is asking for a secret", "titleAny": "An agent is asking for a secret", "from": "From",
            "remote": "Remote device", "ambiguous": "Can't tell", "hint": "Touch immurok to allow", "provider": "Provider", "item": "Item",
            "field": "Field", "picked": "Auto-picked", "command": "Command", "deny": "Deny",
-           "left": "Denies in %d s", "more": "Click to see the full command"],
+           "left": "Denies in %d s", "more": "Click to see the full command",
+           "unlockTitle": "Unlocking the Bitwarden vault", "unlockHint": "Touch immurok to release the master password",
+           "key": "Master password", "unlockLeft": "Gives up in %d s"],
 ]
 let table = strings[lang.hasPrefix("zh") ? "zh-Hant" : "en"]!
 func t(_ k: String) -> String { table[k]! }
-let title = origin == "local" && request.agent != nil ? String(format: t("title"), request.agent!) : t("titleAny")
+let title = unlocking ? t("unlockTitle")
+    : origin == "local" && request.agent != nil ? String(format: t("title"), request.agent!) : t("titleAny")
 
 struct Knocking: View {
     @State private var ripple = false
@@ -145,7 +153,7 @@ struct Countdown: View {
                     }
                 }
                 .frame(height: 6)
-                Text(String(format: t("left"), Int(left.rounded(.up))))
+                Text(String(format: t(unlocking ? "unlockLeft" : "left"), Int(left.rounded(.up))))
                     .font(.system(size: 11, weight: .medium).monospacedDigit()).foregroundStyle(.secondary)
             }
         }
@@ -159,7 +167,7 @@ struct Card: View {
                 Knocking()
                 VStack(alignment: .leading, spacing: 3) {
                     Text(title).font(.system(size: 15, weight: .semibold))
-                    Text(t("hint")).font(.system(size: 12)).foregroundStyle(.secondary)
+                    Text(t(unlocking ? "unlockHint" : "hint")).font(.system(size: 12)).foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 0)
                 Button {
@@ -174,21 +182,27 @@ struct Card: View {
                 .buttonStyle(.plain)
             }
             Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 8) {
-                if origin == "remote" || origin == "ambiguous" {
+                if !unlocking && (origin == "remote" || origin == "ambiguous") {
                     Row(label: t("from"), value: t(origin), mono: false)
                     Divider().gridCellUnsizedAxes(.horizontal)
                 }
                 Row(label: t("provider"), value: provider, mono: false)
                 Divider().gridCellUnsizedAxes(.horizontal)
-                Row(label: t("item"), value: item)
-                Divider().gridCellUnsizedAxes(.horizontal)
-                Row(label: t("field"), value: field, badge: picked ? t("picked") : nil)
+                if unlocking {
+                    Row(label: t("key"), value: item)
+                } else {
+                    Row(label: t("item"), value: item)
+                    Divider().gridCellUnsizedAxes(.horizontal)
+                    Row(label: t("field"), value: field, badge: picked ? t("picked") : nil)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(14)
             .frame(maxWidth: .infinity, alignment: .leading)
             .glassEffect(.regular, in: .rect(cornerRadius: 16))
-            CommandBox()
+            if !unlocking {
+                CommandBox()
+            }
             Countdown().padding(.horizontal, 4)
         }
         .padding(18)
